@@ -1,0 +1,29 @@
+# Keep the build context small and ensure no local secret or build artifact is
+# ever sent to the Docker daemon.
+node_modules
+.next
+out
+build
+coverage
+
+.env
+.env.*
+!.env.template
+
+*.log
+npm-debug.log*
+
+.git
+.gitignore
+.github
+.husky
+.vscode
+.cursor
+.idea
+.DS_Store
+Thumbs.db
+
+Dockerfile
+.dockerignore
+docker-compose*.yml
+*.md

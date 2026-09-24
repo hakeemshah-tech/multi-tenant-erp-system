@@ -1,0 +1,45 @@
+{
+  "name": "erp-platform",
+  "version": "1.0.0",
+  "private": true,
+  "description": "Enterprise ERP: containerized multi-tenant ERP platform",
+  "license": "UNLICENSED",
+  "engines": {
+    "node": ">=20.19.0 <21",
+    "npm": ">=10.0.0"
+  },
+  "comment": "Docker is the supported way to run this stack, see the Makefile. The scripts below are a fallback for working without a container runtime, and they require MongoDB (as a replica set) and Redis to already be running locally.",
+  "scripts": {
+    "install:all": "npm install && npm --prefix server install && npm --prefix client install",
+    "dev": "concurrently --names \"server,client\" --prefix-colors \"cyan,magenta\" --kill-others-on-fail \"npm:dev:server\" \"npm:dev:client\"",
+    "dev:server": "npm --prefix server run dev",
+    "dev:client": "npm --prefix client run dev",
+    "build": "npm --prefix server run build && npm --prefix client run build",
+    "start": "concurrently --names \"server,client\" --prefix-colors \"cyan,magenta\" --kill-others-on-fail \"npm:start:server\" \"npm:start:client\"",
+    "start:server": "npm --prefix server run start",
+    "start:client": "npm --prefix client run start",
+    "test": "npm --prefix server run test",
+    "lint": "concurrently --names \"server,client\" \"npm:lint:server\" \"npm:lint:client\"",
+    "lint:server": "npm --prefix server run lint",
+    "lint:client": "npm --prefix client run lint",
+    "typecheck": "npm --prefix server run typecheck",
+    "format": "prettier --write .",
+    "format:check": "prettier --check .",
+    "prepare": "husky"
+  },
+  "comment:lint-staged": "Formatting only. ESLint is not run here because it would have to boot two separate project configs on every commit; CI owns the lint gate.",
+  "lint-staged": {
+    "*.{js,jsx,ts,tsx,mjs,cjs}": [
+      "prettier --write"
+    ],
+    "*.{json,css,scss,md,yml,yaml}": [
+      "prettier --write"
+    ]
+  },
+  "devDependencies": {
+    "concurrently": "^9.2.4",
+    "husky": "^9.1.7",
+    "lint-staged": "^15.5.2",
+    "prettier": "^3.9.8"
+  }
+}

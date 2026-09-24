@@ -1,0 +1,39 @@
+/* Custom scrollbar styles for RBAC page */
+.scrollbar-thin::-webkit-scrollbar {
+  width: 6px;
+  height: 6px;
+}
+
+.scrollbar-thin::-webkit-scrollbar-track {
+  background: #f1f5f9;
+}
+
+.scrollbar-thin::-webkit-scrollbar-thumb {
+  background: #cbd5e1;
+  border-radius: 3px;
+}
+
+.scrollbar-thin::-webkit-scrollbar-thumb:hover {
+  background: #94a3b8;
+}
+
+.permission-btn {
+  transition: all 0.15s ease;
+}
+
+.permission-btn:hover {
+  transform: scale(1.1);
+}
+
+.menu-item {
+  transition: all 0.2s ease;
+}
+
+.menu-item:hover {
+  background-color: #f9fafb;
+}
+
+.menu-item.selected {
+  background-color: #eff6ff;
+  border-left: 3px solid #2563eb;
+}

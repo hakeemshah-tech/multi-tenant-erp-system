@@ -1,0 +1,115 @@
+# =============================================================================
+# Repository-wide ignore rules.
+#
+# The secret rules below are the important ones: they are enforced again by the
+# .husky/pre-commit hook, which refuses a commit that stages an env file.
+# =============================================================================
+
+# --- Dependencies ------------------------------------------------------------
+node_modules/
+**/node_modules/
+.pnp
+.pnp.*
+.yarn/*
+!.yarn/patches
+!.yarn/plugins
+!.yarn/releases
+!.yarn/versions
+jspm_packages/
+bower_components/
+
+# --- Build output ------------------------------------------------------------
+dist/
+**/dist/
+build/
+**/build/
+out/
+**/out/
+.next/
+**/.next/
+.turbo/
+.swc/
+*.tsbuildinfo
+next-env.d.ts
+
+# --- Secrets and local configuration -----------------------------------------
+# Every env file is ignored; only the checked-in template is allowed through.
+.env
+.env.*
+**/.env
+**/.env.*
+!.env.template
+!**/.env.template
+!.env.example
+!**/.env.example
+
+# Deployment env files of the kind that previously shipped in server/scripts/.
+env-dev
+env-prod
+env-*.local
+
+# Key material, in any directory.
+*.pem
+*.key
+*.p12
+*.pfx
+*.cer
+*.crt
+!**/node_modules/**/*.pem
+
+# --- Editors and tooling -----------------------------------------------------
+.vscode/
+!.vscode/extensions.json
+.cursor/
+.cursorrules
+.idea/
+*.suo
+*.ntvs*
+*.njsproj
+*.sln
+*.swp
+*.swo
+*~
+
+# --- OS artifacts ------------------------------------------------------------
+.DS_Store
+.DS_Store?
+._*
+.Spotlight-V100
+.Trashes
+Thumbs.db
+ehthumbs.db
+Desktop.ini
+
+# --- Logs and diagnostics ----------------------------------------------------
+logs/
+*.log
+npm-debug.log*
+yarn-debug.log*
+yarn-error.log*
+pnpm-debug.log*
+.pnpm-debug.log*
+pids/
+*.pid
+*.seed
+*.pid.lock
+report.[0-9]*.[0-9]*.[0-9]*.[0-9]*.json
+
+# --- Test and cache output ---------------------------------------------------
+coverage/
+.nyc_output/
+.eslintcache
+.stylelintcache
+*.lcov
+
+# --- Runtime data ------------------------------------------------------------
+# Uploaded files live in a Docker volume, not in the working tree.
+server/uploads/*
+!server/uploads/.gitkeep
+
+# --- Archives and misc -------------------------------------------------------
+*.zip
+*.tar
+*.tar.gz
+.vercel
+todo

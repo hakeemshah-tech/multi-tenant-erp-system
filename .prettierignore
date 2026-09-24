@@ -1,0 +1,21 @@
+# Generated or vendored, never reformat.
+node_modules/
+**/node_modules/
+dist/
+**/dist/
+build/
+.next/
+**/.next/
+out/
+coverage/
+package-lock.json
+*.min.js
+*.min.css
+
+# Whitespace-significant; Prettier does not understand them.
+Makefile
+*.conf
+
+# The NDA compliance notice at the bottom must stay byte-for-byte as supplied,
+# including its trailing spaces. Prettier would strip them.
+README.md

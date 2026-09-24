@@ -1,0 +1,380 @@
+# =============================================================================
+# Enterprise ERP: CI pipeline
+#
+# Three concerns, deliberately separate jobs so a failure names itself:
+#
+#   lint    static analysis on both codebases
+#   test    backend unit tests
+#   build   container images build AND actually come up healthy
+#
+# `build` is the gate that matters. A Dockerfile that builds but produces an
+# image that exits on boot is a broken deploy, so the final job starts the whole
+# compose stack and waits for every healthcheck to report healthy.
+# =============================================================================
+
+name: ERP Deployment Pipeline
+
+on:
+  push:
+    branches: ["**"]
+  pull_request:
+    branches: [main, master, develop]
+  workflow_dispatch:
+
+# A new push supersedes an in-flight run on the same ref.
+concurrency:
+  group: ${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
+permissions:
+  contents: read
+
+env:
+  NODE_VERSION: "20.19.6"
+
+jobs:
+  # ---------------------------------------------------------------------------
+  lint:
+    name: Lint (${{ matrix.workspace }})
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+
+    strategy:
+      fail-fast: false
+      matrix:
+        workspace: [server, client]
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: ${{ env.NODE_VERSION }}
+          cache: npm
+          cache-dependency-path: ${{ matrix.workspace }}/package-lock.json
+
+      - name: Install dependencies
+        working-directory: ${{ matrix.workspace }}
+        run: npm ci --no-audit --no-fund
+
+      - name: ESLint
+        working-directory: ${{ matrix.workspace }}
+        run: npm run lint
+
+  # ---------------------------------------------------------------------------
+  # Deliberately no repo-wide `prettier --check` job. This codebase predates the
+  # formatter, so such a job would fail on every file that has not been touched
+  # yet. Formatting converges through .husky/pre-commit, which formats staged
+  # files on the way in. Run `npm run format` to normalize the whole tree once
+  # you are ready for that diff.
+  # ---------------------------------------------------------------------------
+
+  test:
+    name: Backend unit tests
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: ${{ env.NODE_VERSION }}
+          cache: npm
+          cache-dependency-path: server/package-lock.json
+
+      - name: Install dependencies
+        working-directory: server
+        run: npm ci --no-audit --no-fund
+
+      # These suites cover pure logic (JWT secret validation and the RBAC
+      # permission gate), so they need no MongoDB or Redis. The secrets below
+      # are throwaway values that satisfy the startup validation.
+      # Step-level budget. The suite runs in seconds; anything approaching this
+      # is a hang, and failing here names the test rather than showing up as a
+      # cancelled job with no verdict. No Redis or Mongo service container is
+      # needed because these specs mock their clients and open no sockets.
+      - name: Run tests
+        working-directory: server
+        timeout-minutes: 5
+        env:
+          NODE_ENV: test
+          JWT_ACCESS_SECRET: ci-access-secret-0123456789abcdef0123456789
+          JWT_REFRESH_SECRET: ci-refresh-secret-0123456789abcdef012345678
+        run: npm run test:ci
+
+  # ---------------------------------------------------------------------------
+  secret-scan:
+    name: Secret scan
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+
+    steps:
+      - uses: actions/checkout@v4
+
+      # Belt and braces alongside .gitignore and the pre-commit hook: this is
+      # the check that runs even when someone commits with --no-verify.
+      - name: Fail on committed env or key files
+        run: |
+          set -euo pipefail
+          matches=$(git ls-files \
+            | grep -E '(^|/)\.env($|\.)|(^|/)env-(dev|prod)$|\.(pem|key|p12|pfx)$' \
+            | grep -vE '\.env\.(template|example)$' || true)
+          if [ -n "$matches" ]; then
+            echo "::error::Environment or key files are committed:"
+            echo "$matches"
+            exit 1
+          fi
+          echo "No env or key files tracked."
+
+      - name: Fail on credential-shaped strings
+        run: |
+          set -euo pipefail
+          if git grep -nIE \
+            'AKIA[0-9A-Z]{16}|BEGIN [A-Z ]*PRIVATE KEY|sk_(live|test)_[0-9a-zA-Z]{20,}|mongodb(\+srv)?://[^<[:space:]]*:[^@[:space:]]+@' \
+            -- ':!*.lock' ':!package-lock.json' ':!.github/workflows/*' \
+               ':!.husky/*' ':!.gitignore' ':!ENV_SETUP.md' ':!.env.template'
+          then
+            echo "::error::Credential-shaped string found in tracked content."
+            exit 1
+          fi
+          echo "No credential patterns found."
+
+  # ---------------------------------------------------------------------------
+  build:
+    name: Build images & verify container health
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    needs: [lint, test, secret-scan]
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: docker/setup-buildx-action@v3
+
+      - name: Build backend image
+        uses: docker/build-push-action@v6
+        with:
+          context: ./server
+          push: false
+          load: true
+          tags: erp-platform/server:ci
+          cache-from: type=gha,scope=server
+          cache-to: type=gha,scope=server,mode=max
+
+      - name: Build frontend image
+        uses: docker/build-push-action@v6
+        with:
+          context: ./client
+          push: false
+          load: true
+          tags: erp-platform/client:ci
+          build-args: |
+            NEXT_PUBLIC_API_BASE_URL=/api
+            NEXT_PUBLIC_BASE_URL=/
+          cache-from: type=gha,scope=client
+          cache-to: type=gha,scope=client,mode=max
+
+      # A CI-only .env. These are throwaway values for a stack that is torn down
+      # at the end of the job and never accepts external traffic.
+      #
+      # Written from scratch rather than appended to a copy of .env.template.
+      # Appending left two definitions of each key in one file and relied on
+      # "last one wins" holding identically for compose interpolation and for
+      # env_file; writing each key once removes that assumption.
+      - name: Generate CI environment
+        run: |
+          set -euo pipefail
+          cat > .env <<EOF
+          NODE_ENV=production
+          PORT=5000
+          EDGE_PORT=8080
+          IMAGE_TAG=ci
+
+          APP_URL=http://localhost:8080
+          FRONTEND_URL=http://localhost:8080
+          CORS_ORIGIN=http://localhost:8080
+
+          MONGO_DB=erp_platform
+
+          REDIS_PASSWORD=$(openssl rand -hex 16)
+          REDIS_TLS=false
+
+          JWT_ACCESS_SECRET=$(openssl rand -hex 32)
+          JWT_REFRESH_SECRET=$(openssl rand -hex 32)
+
+          ADMIN_EMAIL=admin@example.com
+          ADMIN_NAME=Platform Administrator
+          ADMIN_PASSWORD=$(openssl rand -base64 18)
+
+          AWS_REGION=us-east-1
+          AWS_ACCESS_KEY_ID=ci-placeholder
+          AWS_SECRET_ACCESS_KEY=ci-placeholder
+          S3_BUCKET=ci-placeholder
+
+          CLOUDFRONT_DOMAIN=
+          CLOUDFRONT_KEY_PAIR_ID=
+          CLOUDFRONT_PRIVATE_KEY_BASE64=
+          URL_SIGNING_EXPIRES_SECONDS=300
+
+          SMTP_USER=
+          SMTP_PASS=
+          STRIPE_SECRET_KEY=
+          EOF
+
+          # Fail here, with a readable message, rather than inside `compose up`
+          # if a key the stack needs is missing.
+          for key in JWT_ACCESS_SECRET JWT_REFRESH_SECRET REDIS_PASSWORD \
+                     AWS_REGION AWS_ACCESS_KEY_ID AWS_SECRET_ACCESS_KEY S3_BUCKET; do
+            grep -qE "^${key}=.+" .env || { echo "::error::$key missing from generated .env"; exit 1; }
+          done
+          echo "Generated .env with $(grep -c '=' .env) assignments."
+
+      # Confirms the compose file and the generated .env agree before anything
+      # starts, so a bad interpolation fails here instead of mid-startup.
+      - name: Validate compose configuration
+        run: docker compose config --quiet
+
+      # `depends_on: service_healthy` makes `up` block and then fail with
+      # `dependency failed to start`, which names the unhealthy container but
+      # not the reason. The reason is in that container's own log, so it is
+      # printed here, on its own, before the step exits.
+      - name: Start the stack
+        run: |
+          set -uo pipefail
+          if docker compose up -d --no-build; then
+            echo "Stack started."
+            exit 0
+          fi
+
+          echo "::error::docker compose up failed. Per-service diagnostics follow."
+
+          echo "::group::container states"
+          docker compose ps -a
+          echo "::endgroup::"
+
+          for svc in server client nginx redis mongo; do
+            echo "::group::${svc} logs"
+            docker compose logs --no-log-prefix --tail=200 "$svc" 2>&1 || true
+            echo "::endgroup::"
+          done
+
+          echo "::group::server healthcheck probe history"
+          cid=$(docker compose ps -aq server || true)
+          if [ -n "$cid" ]; then
+            docker inspect "$cid" \
+              --format '{{json .State.Health}}' 2>/dev/null \
+              | head -c 4000 || true
+            echo
+            echo "exit code: $(docker inspect "$cid" --format '{{.State.ExitCode}}' 2>/dev/null || echo unknown)"
+            echo "restarts:  $(docker inspect "$cid" --format '{{.RestartCount}}' 2>/dev/null || echo unknown)"
+          fi
+          echo "::endgroup::"
+
+          exit 1
+
+      # The real assertion: every service must reach `healthy`, which means the
+      # API connected to Mongo and Redis and the Next server is serving.
+      - name: Wait for all containers to report healthy
+        run: |
+          set -euo pipefail
+          services="mongo redis server client nginx"
+          deadline=$(( $(date +%s) + 240 ))
+
+          while :; do
+            pending=""
+            for svc in $services; do
+              cid=$(docker compose ps -q "$svc" || true)
+              if [ -z "$cid" ]; then
+                pending="$pending $svc(missing)"
+                continue
+              fi
+              status=$(docker inspect -f '{{if .State.Health}}{{.State.Health.Status}}{{else}}{{.State.Status}}{{end}}' "$cid")
+              case "$status" in
+                healthy|running) ;;
+                *) pending="$pending $svc($status)" ;;
+              esac
+            done
+
+            [ -z "$pending" ] && break
+
+            if [ "$(date +%s)" -ge "$deadline" ]; then
+              echo "::error::Timed out waiting for:$pending"
+              docker compose ps
+              docker compose logs --tail=120
+              exit 1
+            fi
+
+            echo "waiting for:$pending"
+            sleep 5
+          done
+
+          echo "All services healthy."
+
+      - name: Smoke-test through the proxy
+        run: |
+          set -euo pipefail
+          echo "--- proxy liveness ---"
+          curl -fsS --retry 5 --retry-delay 3 http://localhost:8080/healthz
+
+          echo "--- API liveness via proxy ---"
+          curl -fsS --retry 5 --retry-delay 3 http://localhost:8080/api/health
+          echo
+
+          # Liveness only proves the process is answering. Readiness is what
+          # proves Mongo and Redis are actually connected, so assert it
+          # explicitly: a datastore the API cannot reach now fails here with a
+          # readable body instead of surfacing as an opaque "unhealthy".
+          echo "--- API readiness (asserts Mongo + Redis are connected) ---"
+          for attempt in $(seq 1 30); do
+            body=$(curl -fsS http://localhost:8080/api/ready 2>/dev/null || true)
+            case "$body" in
+              *'"status":"ready"'*)
+                echo "ready: $body"
+                break
+                ;;
+            esac
+            if [ "$attempt" -eq 30 ]; then
+              echo "::error::API never became ready. Last response: ${body:-<none>}"
+              docker compose logs --tail=150 server
+              exit 1
+            fi
+            sleep 2
+          done
+
+          echo "--- app shell ---"
+          code=$(curl -s -o /dev/null -w '%{http_code}' http://localhost:8080/login)
+          echo "GET /login -> $code"
+          [ "$code" -lt 500 ] || { echo "::error::frontend returned $code"; exit 1; }
+
+      # Proves the isolation claim rather than just asserting it in the docs:
+      # the datastores sit on an `internal: true` network and must not be
+      # reachable from the host.
+      - name: Assert datastores are not exposed to the host
+        run: |
+          set -euo pipefail
+          for port in 27017 6379; do
+            if timeout 3 bash -c "</dev/tcp/127.0.0.1/$port" 2>/dev/null; then
+              echo "::error::port $port is reachable from the host; it must stay on the internal network"
+              exit 1
+            fi
+            echo "port $port correctly unreachable from host"
+          done
+
+      # Per-service and ordered by how likely each is to hold the cause. A
+      # single combined dump is unusable: mongod alone outgrows the log viewer
+      # and hides the application error.
+      - name: Dump logs on failure
+        if: failure()
+        run: |
+          set -uo pipefail
+          docker compose ps -a || true
+          for svc in server client nginx redis mongo; do
+            echo "::group::${svc} logs"
+            docker compose logs --no-log-prefix --tail=200 "$svc" 2>&1 || true
+            echo "::endgroup::"
+          done
+
+      - name: Tear down
+        if: always()
+        run: docker compose down --volumes --remove-orphans

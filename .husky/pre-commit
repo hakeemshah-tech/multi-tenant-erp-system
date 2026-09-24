@@ -1,0 +1,90 @@
+#!/usr/bin/env sh
+# =============================================================================
+# pre-commit
+#
+# Two gates, cheapest and most important first:
+#   1. Refuse any commit that stages a secret-bearing file.
+#   2. Format and lint the staged files via lint-staged.
+#
+# Bypassing this hook with `git commit --no-verify` defeats gate 1. Don't.
+# =============================================================================
+
+set -e
+
+RED='\033[0;31m'
+YELLOW='\033[0;33m'
+GREEN='\033[0;32m'
+NC='\033[0m'
+
+STAGED=$(git diff --cached --name-only --diff-filter=ACMR)
+
+if [ -z "$STAGED" ]; then
+  exit 0
+fi
+
+# -----------------------------------------------------------------------------
+# Gate 1: no environment or key files
+#
+# Matches .env and .env.<anything> in any directory, the env-dev/env-prod
+# deployment files that previously carried live credentials, and raw key
+# material. .env.template and .env.example are explicitly allowed.
+# -----------------------------------------------------------------------------
+BLOCKED=$(printf '%s\n' "$STAGED" | grep -E \
+  '(^|/)\.env($|\.)|(^|/)env-(dev|prod)$|\.(pem|key|p12|pfx)$' \
+  | grep -vE '\.env\.(template|example)$' || true)
+
+if [ -n "$BLOCKED" ]; then
+  printf "\n${RED}✖ Commit blocked: these files look like they carry secrets.${NC}\n\n"
+  printf '%s\n' "$BLOCKED" | sed 's/^/    /'
+  printf "\n  Environment files must never be committed. Use .env.template for\n"
+  printf "  placeholders and keep real values in an untracked .env.\n\n"
+  printf "  Unstage with:  ${YELLOW}git restore --staged <file>${NC}\n\n"
+  exit 1
+fi
+
+# -----------------------------------------------------------------------------
+# Gate 2: content scan
+#
+# Catches credentials pasted into an otherwise ordinary source file, which the
+# filename check above cannot see.
+# -----------------------------------------------------------------------------
+LEAKS=""
+for file in $STAGED; do
+  [ -f "$file" ] || continue
+  case "$file" in
+    *.png|*.jpg|*.jpeg|*.gif|*.ico|*.pdf|*.zip|*.woff|*.woff2|package-lock.json)
+      continue
+      ;;
+    .husky/pre-commit|.gitignore|.env.template|ENV_SETUP.md)
+      # These legitimately describe the patterns being searched for.
+      continue
+      ;;
+  esac
+
+  if git show ":$file" 2>/dev/null | grep -qE \
+    'AKIA[0-9A-Z]{16}|BEGIN [A-Z ]*PRIVATE KEY|sk_(live|test)_[0-9a-zA-Z]{20,}|mongodb(\+srv)?://[^<[:space:]]*:[^@[:space:]]+@'
+  then
+    LEAKS="$LEAKS\n    $file"
+  fi
+done
+
+if [ -n "$LEAKS" ]; then
+  printf "\n${RED}✖ Commit blocked: possible credential in staged content.${NC}\n"
+  printf "$LEAKS\n"
+  printf "\n  Found something matching an AWS key, a private key block, a Stripe\n"
+  printf "  secret, or a database URI with an inline password.\n\n"
+  printf "  If this is a false positive, move the value to an env var anyway.\n\n"
+  exit 1
+fi
+
+# -----------------------------------------------------------------------------
+# Gate 3: formatting and lint on staged files only
+# -----------------------------------------------------------------------------
+if [ -f node_modules/.bin/lint-staged ]; then
+  npx --no-install lint-staged
+else
+  printf "${YELLOW}⚠ lint-staged not installed, skipping format check.${NC}\n"
+  printf "  Run 'npm install' at the repository root to enable it.\n"
+fi
+
+printf "${GREEN}✔ pre-commit checks passed${NC}\n"
